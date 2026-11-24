@@ -396,17 +396,17 @@ services:
     # Chạy xong thì thoát, không dựng lại
     restart: "no"
 
-  # dbt — CHẠY THỦ CÔNG, không có scheduler.
+  # dbt — Image cho scheduler và chạy thủ công.
+  # Tự động build image kltn-dbt:latest khi `compose up` để dbt-scheduler không bị 404.
   #
-  #   docker compose --profile dbt run --rm dbt build   # dựng toàn bộ model
-  #   docker compose --profile dbt run --rm dbt test    # chạy test
-  #   docker compose --profile dbt run --rm dbt run --select mart_revenue
+  #   docker compose run --rm dbt build   # dựng toàn bộ model
+  #   docker compose run --rm dbt test    # chạy test
+  #   docker compose run --rm dbt run --select mart_revenue
   #
-  # profile 'dbt' nên `up -d` thường không đụng tới nó.
   dbt:
+    image: kltn-dbt:latest
     build:
       context: ./scripts/dbt
-    profiles: [dbt]
     working_dir: /dbt
     volumes:
       - ./local-infra-sandbox/dbt_warehouse:/dbt
@@ -427,6 +427,8 @@ services:
       PG_SOURCE_DB: ${POSTGRES_DB:-getshopy}
       PG_SOURCE_USER: ${POSTGRES_USER:-getshopy}
       PG_SOURCE_PASSWORD: ${POSTGRES_PASSWORD:?thieu .env - xin file .env tu chu repo, dat o thu muc goc roi chay lai}
+    command: ["--help"]
+    restart: "no"
 
   # ── Seed dữ liệu — CHẠY TAY, tách khỏi `up` từ 04/10/2026 ─────────────────────
   # `up` chỉ seed nền nhẹ (tài khoản, danh mục, hãng, voucher, tài khoản test).
@@ -486,6 +488,7 @@ services:
     image: mcuadros/ofelia:latest
     depends_on:
       clickhouse: {condition: service_healthy}
+      dbt: {condition: service_completed_successfully}
     command: daemon --docker
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
