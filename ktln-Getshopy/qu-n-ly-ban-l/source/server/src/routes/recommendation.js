@@ -9,6 +9,7 @@
  *
  * Endpoints:
  *   GET /api/b2c/recommendations          — Gợi ý sản phẩm cho khách hàng
+ *   GET /api/b2c/recommendations/next-week — "Có thể bạn cần": món sắp cần mua lại (7 ngày)
  *   GET /api/b2c/similar/:productId       — Sản phẩm tương tự (specs-aware)
  */
 
@@ -54,6 +55,28 @@ router.get('/b2c/recommendations', optionalAuthB2C, async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error('[Recommendation Error]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/b2c/recommendations/next-week — "Có thể bạn cần" (25/11/2026)
+//
+// Món khách có thể sắp cần MUA LẠI trong 7 ngày tới, theo chu kỳ mua lặp lại (ai-rec
+// /api/v1/predict/next-week, xem RecommendationService.getNextWeekProducts).
+//
+// Cùng nguyên tắc với /b2c/recommendations: danh tính CHỈ lấy từ token (optionalAuthB2C) —
+// nhận id trên URL thì đổi tham số là xem được lịch sử mua của người khác. Khách vãng lai
+// không có lịch sử mua -> [] (không 401: request() phía client xử lý 401 bằng xoá phiên +
+// về trang chủ). [] thì trang chủ ẩn section, không thay bằng hàng bán chạy (sai ý nghĩa).
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/b2c/recommendations/next-week', optionalAuthB2C, async (req, res) => {
+  try {
+    if (!req.b2cUser) return res.json([]);
+    const result = await RecommendationService.getNextWeekProducts(req.b2cUser.id, { topK: 8 });
+    res.json(result);
+  } catch (err) {
+    console.error('[NextWeek Recommendation Error]', err.message);
     res.status(500).json({ error: err.message });
   }
 });
