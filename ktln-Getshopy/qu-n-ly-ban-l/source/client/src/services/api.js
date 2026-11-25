@@ -118,6 +118,9 @@ export const api = {
   // theo email — nên nhánh Collaborative Filtering không bao giờ chạy.
   recommendation: {
     get: () => request('/b2c/recommendations'),
+    // "Có thể bạn cần" (25/11/2026): món sắp cần mua lại trong 7 ngày (ai-rec next-week).
+    // Khách vãng lai / chưa có dữ liệu -> [] -> trang chủ ẩn section.
+    nextWeek: () => request('/b2c/recommendations/next-week'),
   },
 
   // ─── AI APIs (backward compat aliases) ──────────────────────

@@ -643,9 +643,116 @@ async function getRelatedProducts(productId) {
   return results;
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// NEW (25/11/2026): getNextWeekProducts() — section "Có thể bạn cần" ở trang chủ
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// ai-rec GET /api/v1/predict/next-week/customer/{id} (nhánh feat/ai-rec-next-week-prediction,
+// ai-rec/models/next_week.py): xác suất khách MUA LẠI từng món trong W ngày tới, tính từ chu kỳ
+// mua lặp lại trong lịch sử đơn (Poisson-Gamma / IPT hazard). Khác /recommend (món mới hợp gu):
+// đây là món khách ĐÃ mua và có thể sắp cần mua lại. Response chỉ có product_id + xác suất —
+// tên, giá, ảnh lấy từ Postgres như getRecommendations.
+//
+// 2 s: chưa đo được độ trễ trên production (endpoint chưa deploy lúc viết); cùng cỡ các lần gọi
+// ai-rec khác trong file (realtime 1,5 s, GET 3 s). Client gọi riêng route này nên chậm / hết giờ
+// không chặn phần còn lại của trang chủ — section chỉ ẩn đi.
+const AI_REC_NEXT_WEEK_TIMEOUT_MS = 2000;
+const NEXT_WEEK_HORIZON_DAYS = 7;
+
+/**
+ * Gọi ai-rec lấy dự đoán mua lại trong NEXT_WEEK_HORIZON_DAYS ngày tới.
+ * ai-rec bản cũ chưa có endpoint (404), lỗi mạng, quá giờ -> [] (section ẩn, không báo lỗi khách).
+ *
+ * @param {number|string|bigint} customerId - B2CCustomer.id (từ token)
+ * @param {number} topK
+ * @returns {Promise<Array<{product_id: string, purchase_probability: number}>>} theo xác suất giảm dần
+ */
+async function fetchNextWeekPredictions(customerId, topK) {
+  if (!AI_REC_URL) return [];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_REC_NEXT_WEEK_TIMEOUT_MS);
+  try {
+    const url = `${AI_REC_URL}/api/v1/predict/next-week/customer/${encodeURIComponent(String(customerId))}`
+      + `?top_k=${topK}&horizon_days=${NEXT_WEEK_HORIZON_DAYS}`;
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      console.warn(`[RecommendationService] next-week: ai-rec trả ${response.status}, ẩn section`);
+      return [];
+    }
+    const data = await response.json();
+    return Array.isArray(data.predictions) ? data.predictions : [];
+  } catch (err) {
+    console.warn('[RecommendationService] next-week: ai-rec không khả dụng, ẩn section:', err.message);
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Sản phẩm khách có thể sắp cần mua lại (7 ngày tới), đủ thông tin để vẽ thẻ sản phẩm như
+ * getRecommendations, GIỮ thứ tự xác suất của ai-rec, giá flash sale nếu có. Món đã xoá / hết
+ * hàng bị bỏ. Kèm `next_week` (xác suất, chu kỳ, số ngày từ lần mua cuối, số đơn đã mua).
+ *
+ * @param {number|string|bigint} customerId - B2CCustomer.id, CHỈ lấy từ token (routes/recommendation.js)
+ * @param {{topK?: number}} [opts]
+ * @returns {Promise<Array>} tối đa topK sản phẩm; [] nếu khách vãng lai / ai-rec không có dữ liệu
+ */
+async function getNextWeekProducts(customerId, { topK = 8 } = {}) {
+  if (!customerId || !AI_REC_URL) return [];
+  const preds = (await fetchNextWeekPredictions(customerId, topK))
+    .filter(p => p && /^\d+$/.test(String(p.product_id)));
+  if (preds.length === 0) return [];
+
+  await KC.ensureLoaded();
+  const [fsItems, rows] = await Promise.all([
+    getActiveFlashSaleItems(),
+    prisma.product.findMany({
+      where: { id: { in: preds.map(p => BigInt(p.product_id)) }, is_deleted: false, stock: { gt: 0 } },
+      select: {
+        id: true, name: true, price: true, original_price: true,
+        image: true, rating: true, sold: true, category_id: true, brand_id: true,
+        description: true, // cần cho PSC.getTopSpecs
+      },
+    }),
+  ]);
+
+  // findMany(... IN ...) không giữ thứ tự -> sắp lại theo thứ tự xác suất của ai-rec
+  const byId = new Map(rows.map(r => [String(r.id), r]));
+  const seen = new Set();
+  const results = [];
+  for (const pred of preds) {
+    const key = String(pred.product_id);
+    const p = byId.get(key);
+    if (!p || seen.has(key)) continue;
+    seen.add(key);
+    results.push(applyFlashSaleToProduct({
+      id: Number(p.id),
+      name: p.name,
+      price: Number(p.price),
+      original_price: Number(p.original_price || p.price),
+      image: p.image,
+      rating: p.rating ? Number(p.rating) : null,
+      sold: Number(p.sold || 0),
+      category_id: p.category_id,
+      brand_id: p.brand_id,
+      specs: PSC.getTopSpecs(p, 3),
+      next_week: {
+        probability: Number(pred.purchase_probability),
+        expected_cycle_days: pred.expected_cycle_days == null ? null : Number(pred.expected_cycle_days),
+        days_since_last_purchase: Number(pred.days_since_last_purchase),
+        purchase_count: Number(pred.purchase_count),
+      },
+    }, fsItems));
+    if (results.length >= topK) break;
+  }
+  return results;
+}
+
 module.exports = {
   getRecommendations,
   getRelatedProducts,
+  getNextWeekProducts,
   getActiveFlashSaleItems,
   applyFlashSaleToProduct,
   // Cho script kiểm tra end-to-end (chỉ đọc) gọi thẳng nhánh AI-Rec

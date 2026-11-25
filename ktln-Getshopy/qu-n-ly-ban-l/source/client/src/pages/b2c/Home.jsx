@@ -100,6 +100,54 @@ const CATEGORY_FBX = {
   'cat-watch':      watchFbx,
 };
 
+// ── Section "Có thể bạn cần" (25/11/2026) ─────────────────────────────────────
+// Món khách có thể sắp cần MUA LẠI trong 7 ngày tới, theo chu kỳ mua lặp lại (ai-rec
+// /api/v1/predict/next-week qua server /api/b2c/recommendations/next-week).
+// Component riêng vì section chỉ hiện khi đã có dữ liệu: useRevealOnScroll gắn
+// IntersectionObserver lúc MOUNT, nên dùng hook ngay trong Home thì phần tử xuất hiện sau
+// (khi API trả về) không bao giờ được quan sát và đứng mãi ở opacity 0.
+function NextWeekSection({ products, isDark, renderProductCard }) {
+  const [ref, vis] = useRevealOnScroll({ threshold: 0.08 });
+  return (
+    <section ref={ref} style={{
+      maxWidth: 1320,
+      margin: '0 auto 70px',
+      padding: '0 24px',
+      ...revealStyle(vis),
+    }}>
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        paddingBottom: 14,
+        borderBottom: `1px solid ${isDark ? 'rgba(255,255,255,0.08)' : '#e5e7eb'}`,
+        marginBottom: 14,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <span style={{
+            fontSize: 16,
+            fontWeight: 700,
+            color: isDark ? '#ffffff' : '#111111',
+            letterSpacing: '-0.01em',
+            paddingBottom: 14,
+            marginBottom: -15,
+            borderBottom: `2px solid ${isDark ? '#ffffff' : '#111111'}`,
+            display: 'inline-block',
+          }}>
+            Có thể bạn cần
+          </span>
+        </div>
+      </div>
+      <div style={{ fontSize: 13, color: isDark ? 'rgba(255,255,255,0.55)' : '#6b7280', marginBottom: 28 }}>
+        Dựa trên chu kỳ mua của bạn — những món bạn có thể sắp cần mua lại
+      </div>
+      <div className="commerce-products-grid">
+        {products.slice(0, 8).map(product => renderProductCard(product))}
+      </div>
+    </section>
+  );
+}
+
 export default function Home() {
   const { isDark, selectedBranch, b2cUser, t } = useApp();
   const { addToCart } = useCart();
@@ -181,6 +229,25 @@ export default function Home() {
     loadRecommendations();
     return () => { ignore = true; };
   }, [selectedBranch, b2cUser]);
+
+  // 2b. "Có thể bạn cần" (25/11/2026) — chỉ khách đã đăng nhập (dự đoán từ lịch sử mua).
+  // Rỗng / lỗi / ai-rec chưa có endpoint -> ẩn section, KHÔNG thay bằng hàng bán chạy (sai ý
+  // nghĩa "sắp cần mua lại"). Gắn kèm id khách: đổi tài khoản mà không tải lại trang thì danh
+  // sách của người trước không hiện ra trong lúc chờ.
+  const customerKey = b2cUser?.id ?? null;
+  const [nextWeek, setNextWeek] = useState({ forUser: null, items: [] });
+  useEffect(() => {
+    if (customerKey == null) return undefined;
+    let ignore = false;
+    api.recommendation.nextWeek()
+      .then(data => { if (!ignore) setNextWeek({ forUser: customerKey, items: Array.isArray(data) ? data.slice(0, 8) : [] }); })
+      .catch(err => {
+        console.warn('Next-week rec error:', err);
+        if (!ignore) setNextWeek({ forUser: customerKey, items: [] });
+      });
+    return () => { ignore = true; };
+  }, [customerKey]);
+  const showNextWeek = customerKey != null && nextWeek.forUser === customerKey && nextWeek.items.length > 0;
 
   // 3. Fetch "Sản phẩm mới" (Exactly 8 newest products)
   useEffect(() => {
@@ -738,6 +805,14 @@ export default function Home() {
           </div>
         )}
       </section>
+
+      {/* ══════════════════════════════════════════════════════════════════
+           3b. PHẦN "CÓ THỂ BẠN CẦN" (25/11/2026) — món sắp cần mua lại trong 7 ngày.
+               Chỉ hiện khi đã đăng nhập và ai-rec có dự đoán (xem NextWeekSection).
+         ══════════════════════════════════════════════════════════════════ */}
+      {showNextWeek && (
+        <NextWeekSection products={nextWeek.items} isDark={isDark} renderProductCard={renderProductCard} />
+      )}
 
       {/* ══════════════════════════════════════════════════════════════════
            4. PHẦN "SẢN PHẨM MỚI" (Load đúng 8 sản phẩm, theo mẫu reference)
