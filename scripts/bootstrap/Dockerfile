@@ -8,7 +8,7 @@
 # Trước 04/10/2026 tạo bucket bằng `mc` chép từ image quay.io/minio/mc. Image đó
 # không còn kéo được (MinIO ngừng phát hành bản cộng đồng dựng sẵn — xem
 # local-infra-sandbox/minio/Dockerfile), nên build bootstrap trên máy mới hỏng theo.
-FROM alpine:3.20
+FROM alpine:3.20.10
 
 RUN apk add --no-cache curl gettext
 

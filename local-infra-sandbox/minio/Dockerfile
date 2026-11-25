@@ -41,7 +41,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
         --ldflags "$(MINIO_RELEASE=RELEASE go run buildscripts/gen-ldflags.go)" \
         -o /out/minio
 
-FROM alpine:3.20
+FROM alpine:3.20.10
 
 # curl cho healthcheck (/minio/health/ready) — image chính thức dùng `mc ready`,
 # nhưng mc cũng không còn bản dựng sẵn

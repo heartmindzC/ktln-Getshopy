@@ -1,7 +1,7 @@
 # ==============================================================================
 # Multi-stage/Optimized Production Dockerfile for Recommendation API
 # ==============================================================================
-FROM python:3.11-slim
+FROM python:3.11.18-slim-trixie
 
 # Thiết lập các biến môi trường chuẩn cho Python container
 ENV PYTHONDONTWRITEBYTECODE=1 \
