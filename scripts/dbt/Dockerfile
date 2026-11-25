@@ -2,7 +2,7 @@
 #
 #   docker compose --profile dbt run --rm dbt build
 #   docker compose --profile dbt run --rm dbt test
-FROM python:3.11-slim
+FROM python:3.11.18-slim-trixie
 
 RUN pip install --no-cache-dir \
       dbt-core==1.8.9 \

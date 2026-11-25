@@ -170,7 +170,7 @@ services:
   # ═══ DỮ LIỆU ═════════════════════════════════════════════════════════════
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.15-alpine3.24   # pinned 25/11/2026 = version running (was 16-alpine)
     # wal_level=logical là điều kiện bắt buộc để Debezium tạo replication slot.
     # Thiếu thì connector báo lỗi lúc ĐĂNG KÝ, không phải lúc chạy.
     command:
@@ -214,7 +214,7 @@ services:
     restart: unless-stopped
 
   clickhouse:
-    image: clickhouse/clickhouse-server:24.8-alpine
+    image: clickhouse/clickhouse-server:24.8.14.39-alpine   # pinned 25/11/2026 = version running (was 24.8-alpine)
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-analytics}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
@@ -268,7 +268,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.11-alpine3.21   # pinned 25/11/2026 = version running (was 7-alpine)
     expose: ["6379"]
     volumes:
       - redis_data:/data
@@ -396,17 +396,21 @@ services:
     # Chạy xong thì thoát, không dựng lại
     restart: "no"
 
-  # dbt — Image cho scheduler và chạy thủ công.
-  # Tự động build image kltn-dbt:latest khi `compose up` để dbt-scheduler không bị 404.
+  # dbt — CHẠY THỦ CÔNG (profile 'dbt'): `up -d` thường KHÔNG build, KHÔNG chạy nó.
+  # 25/11/2026: trả lại profile (nhánh ai-rec-next-week bỏ profile -> mọi `up -d` build image dbt,
+  # tốn ổ D:, và kéo theo dbt-scheduler). Image vẫn mang tên kltn-dbt:latest vì dbt-scheduler
+  # (ofelia, job-run bên dưới) chạy đúng image này — build tay MỘT lần trước khi bật scheduler:
   #
-  #   docker compose run --rm dbt build   # dựng toàn bộ model
-  #   docker compose run --rm dbt test    # chạy test
-  #   docker compose run --rm dbt run --select mart_revenue
+  #   docker compose --profile dbt build dbt                 # tạo/cập nhật image kltn-dbt:latest
+  #   docker compose --profile dbt run --rm dbt build        # dựng toàn bộ model
+  #   docker compose --profile dbt run --rm dbt test         # chạy test
+  #   docker compose --profile dbt run --rm dbt run --select mart_revenue
   #
   dbt:
     image: kltn-dbt:latest
     build:
       context: ./scripts/dbt
+    profiles: [dbt]
     working_dir: /dbt
     volumes:
       - ./local-infra-sandbox/dbt_warehouse:/dbt
@@ -427,8 +431,6 @@ services:
       PG_SOURCE_DB: ${POSTGRES_DB:-getshopy}
       PG_SOURCE_USER: ${POSTGRES_USER:-getshopy}
       PG_SOURCE_PASSWORD: ${POSTGRES_PASSWORD:?thieu .env - xin file .env tu chu repo, dat o thu muc goc roi chay lai}
-    command: ["--help"]
-    restart: "no"
 
   # ── Seed dữ liệu — CHẠY TAY, tách khỏi `up` từ 04/10/2026 ─────────────────────
   # `up` chỉ seed nền nhẹ (tài khoản, danh mục, hãng, voucher, tài khoản test).
@@ -484,11 +486,13 @@ services:
   # `dbt build` chứ không `dbt run`: build = run + test, nên checksum 3 tầng
   # chạy mỗi lượt và phát hiện lệch sớm. Chạy `run` là mất dữ liệu giữa đường
   # mà không ai biết cho tới khi chạy test tay.
+  # Cần image kltn-dbt:latest (build tay: docker compose --profile dbt build dbt). KHÔNG đặt
+  # depends_on dbt: dbt nằm trong profile, service thường phụ thuộc service có profile thì `up -d`
+  # báo lỗi; thiếu image thì job ofelia báo "No such image" trong log scheduler.
   dbt-scheduler:
-    image: mcuadros/ofelia:latest
+    image: mcuadros/ofelia:0.3.22   # pinned 25/11/2026 = version running (image label); Hub latest is now 0.3.23
     depends_on:
       clickhouse: {condition: service_healthy}
-      dbt: {condition: service_completed_successfully}
     command: daemon --docker
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro

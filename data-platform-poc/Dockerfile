@@ -5,7 +5,7 @@
 #
 # COPY TƯỜNG MINH từng file chứ không `COPY . .`: thư mục này có .env chứa mật khẩu thật
 # (bản POC cũ). Chép cả thư mục là đóng gói luôn bí mật vào image. .dockerignore chặn thêm một lớp.
-FROM python:3.12-slim
+FROM python:3.12.16-slim-trixie
 
 WORKDIR /app
 
