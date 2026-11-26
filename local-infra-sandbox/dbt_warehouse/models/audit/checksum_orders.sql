@@ -1,4 +1,5 @@
-{{ config(materialized='table', schema='audit', engine='MergeTree()', order_by='checked_at', tags=['audit'],
+{{ config(materialized='incremental', incremental_strategy='append',
+          schema='audit', engine='MergeTree()', order_by='checked_at', tags=['audit'],
           query_settings={'max_threads': 2}) }}
 
 -- =====================================================================
@@ -7,6 +8,18 @@
 -- Đếm và tổng tiền ở ba điểm trên đường đi. Lệch nghĩa là mất bản ghi ở đâu đó
 -- giữa Postgres -> CDC -> MinIO -> warehouse, và đó là loại lỗi KHÔNG tự báo:
 -- pipeline vẫn "chạy", chỉ là thiếu dữ liệu.
+--
+-- Mỗi lần chạy so TOÀN BỘ dữ liệu tới thời điểm đó (không riêng phần một lượt
+-- vừa nạp), rồi NỐI THÊM một dòng (incremental append, 27/11/2026). Trước đó là
+-- `table`: dựng lại mỗi lượt nên chỉ còn đúng một dòng, lượt LỆCH bị lượt sau ghi
+-- đè, không xem được lệch có kéo dài hay không. Dòng mới nhất:
+--   SELECT * FROM audit.checksum_orders ORDER BY checked_at DESC LIMIT 1
+--
+-- Chu kỳ: lượt định kỳ của dbt-scheduler chạy model này MỖI GIỜ, riêng một mình
+-- sau khi các model khác build xong (scripts/dbt/entrypoint.sh). Trước 27/11 nó
+-- chạy mỗi 5 phút song song với model khác: tốn tới 1,18 GiB, góp mặt trong 3/4
+-- lượt dbt lỗi vượt trần RAM ClickHouse (2,70 GiB) ngày 26/11. Chạy tay
+-- `dbt build` vẫn build cả model này. 24 dòng mỗi ngày nên không cần TTL.
 --
 --   src : Postgres  (nguồn nghiệp vụ, sự thật gốc)
 --   stg : parquet trên MinIO qua view s3()
