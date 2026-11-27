@@ -33,8 +33,6 @@ MODEL_PATH = MODEL_DIR / "item_cf.joblib"
 # Bản hybrid (CF + content-based + tham số trộn) — artifact service phục vụ.
 # item_cf.joblib chỉ còn là đường dự phòng khi nâng cấp từ bản thuần CF.
 HYBRID_MODEL_PATH = OUTPUT_DIR / "hybrid" / "recommender.joblib"
-# Mô hình xác suất dự đoán mua lặp lại trong W ngày tới (Phương án A — models/next_week.py).
-NEXT_WEEK_MODEL_PATH = OUTPUT_DIR / "next_week" / "predictor.joblib"
 
 
 
@@ -265,15 +263,3 @@ BEHAVIOR_QUERY = (
 # Một lựa chọn onboarding nặng bằng bấy nhiêu lần mua khi dựng hồ sơ nội dung.
 # CHƯA tinh chỉnh được: cần dữ liệu onboarding thật để đo (xem README đánh giá).
 CB_ONBOARDING_PSEUDO_COUNT = float(os.getenv("CB_ONBOARDING_PSEUDO_COUNT", "1"))
-
-# ==============================================================================
-# Dự đoán sản phẩm sẽ được mua trong 7 ngày tới — xem models/next_week.py
-# ==============================================================================
-NEXT_WEEK_ENABLED = os.getenv("NEXT_WEEK_ENABLED", "1") not in ("0", "false", "False")
-# "poisson_gamma" (A1) | "ipt_hazard" (A2) — chọn theo benchmark cửa sổ 7 ngày.
-NEXT_WEEK_MODEL_TYPE = os.getenv("NEXT_WEEK_MODEL_TYPE", "poisson_gamma")
-# "now" (chuẩn production) | "max_date" (dịch DaysSince về ngày mới nhất của tập demo)
-NEXT_WEEK_REFERENCE_MODE = os.getenv("NEXT_WEEK_REFERENCE_MODE", "now")
-NEXT_WEEK_DEFAULT_HORIZON_DAYS = int(os.getenv("NEXT_WEEK_DEFAULT_HORIZON_DAYS", "7"))
-NEXT_WEEK_DEFAULT_MIN_PROB = float(os.getenv("NEXT_WEEK_DEFAULT_MIN_PROB", "0.05"))
-NEXT_WEEK_MAX_RECENT_PURCHASES = int(os.getenv("NEXT_WEEK_MAX_RECENT_PURCHASES", "200"))

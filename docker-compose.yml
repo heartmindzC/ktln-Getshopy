@@ -167,6 +167,26 @@ services:
       - ai_models:/app/output
     restart: unless-stopped
 
+  ai-next-week:
+    image: ghcr.io/heartmindzc/ktln-getshopy-ai-next-week:${IMAGE_TAG:-local}
+    build:
+      context: ./ktln-Getshopy/qu-n-ly-ban-l/source/ai-next-week
+    environment:
+      PORT: 8002
+      DEFAULT_TOP_K: 10
+      NEXT_WEEK_DEFAULT_HORIZON_DAYS: 7
+      NEXT_WEEK_DEFAULT_MIN_PROB: 0.05
+      NEXT_WEEK_MODEL_TYPE: poisson_gamma
+      TRAIN_DAILY_AT: ${AI_NEXT_WEEK_TRAIN_DAILY_AT:-22:00}
+      TRAIN_TIMEZONE: Asia/Ho_Chi_Minh
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: ${AI_REC_CH_USER:-ai_rec}
+      CLICKHOUSE_PASSWORD: ${AI_REC_CH_PASSWORD:-}
+    expose: ["8002"]
+    volumes:
+      - ai_next_week_models:/app/output
+    restart: unless-stopped
+
   # ═══ DỮ LIỆU ═════════════════════════════════════════════════════════════
 
   postgres:
@@ -713,6 +733,7 @@ volumes:
   minio_data:
   ai_data:
   ai_models:
+  ai_next_week_models:
   prometheus_data:
   grafana_data:
   loki_data:

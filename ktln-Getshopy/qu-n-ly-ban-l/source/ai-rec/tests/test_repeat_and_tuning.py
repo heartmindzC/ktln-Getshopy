@@ -134,9 +134,17 @@ class HybridRepeatChannelTests(unittest.TestCase):
         self.assertEqual(rec.repeat.half_life_days, 7.0)
 
 
+try:
+    from evaluation import benchmark
+    HAS_BENCHMARK = True
+except (ImportError, ModuleNotFoundError):
+    benchmark = None
+    HAS_BENCHMARK = False
+
+
+@unittest.skipUnless(HAS_BENCHMARK, "Offline benchmark suite removed")
 class BenchmarkSelectionTests(unittest.TestCase):
     def setUp(self) -> None:
-        from evaluation import benchmark
         self.bm = benchmark
 
     def grid(self, rows):

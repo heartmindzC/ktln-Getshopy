@@ -14,8 +14,6 @@ import pandas as pd
 from api.schemas import (
     CustomerRecommendationResponse,
     HealthResponse,
-    NextWeekPredictionItem,
-    NextWeekPredictionResponse,
     RecommendationItem,
 )
 from config import (
@@ -30,10 +28,6 @@ from config import (
     HYBRID_MODEL_PATH,
     HYBRID_REPEAT_WEIGHT,
     MODEL_PATH,
-    NEXT_WEEK_ENABLED,
-    NEXT_WEEK_MODEL_PATH,
-    NEXT_WEEK_MODEL_TYPE,
-    NEXT_WEEK_REFERENCE_MODE,
     PRECOMPUTE_BUDGET_SECONDS,
     PRECOMPUTE_ENABLED,
     PRECOMPUTE_TOP_K,
@@ -48,7 +42,6 @@ from data_source import clickhouse
 from models.behavior import BehaviorConfig
 from models.cf_recommendation import CollaborativeFiltering
 from models.hybrid import HybridParams, HybridRecommender, build_recommender
-from models.next_week import NextWeekPredictor
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +80,6 @@ class ModelBundle:
     model: HybridRecommender | None = None
     # khách -> [(product_id, lý do)]
     cache: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
-    next_week: NextWeekPredictor | None = None
     trained_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     source: str = "unknown"
     version: int = 0
@@ -166,18 +158,12 @@ class CFModelService:
             return
 
         loaded = self._load_from_disk()
-        next_week = self._load_next_week_from_disk()
-        if loaded is not None or next_week is not None:
-            stats: dict[str, int | str] = {}
-            if loaded is not None:
-                stats.update(loaded.summary())
-            if next_week is not None:
-                stats.update(next_week.summary())
+        if loaded is not None:
+            stats = dict(loaded.summary())
             self._version += 1
             self._bundle = ModelBundle(
                 model=loaded,
                 cache={},               # cache dựng lại ở lần train đầu tiên
-                next_week=next_week,
                 source="disk",
                 version=self._version,
                 stats=stats,
@@ -208,18 +194,6 @@ class CFModelService:
                 # File hỏng (tiến trình chết giữa lúc ghi) không được chặn khởi động.
                 logger.warning("Không đọc được model %s (%s), thử nguồn khác.", path, exc)
         return None
-
-    @staticmethod
-    def _load_next_week_from_disk() -> NextWeekPredictor | None:
-        if not NEXT_WEEK_ENABLED or not NEXT_WEEK_MODEL_PATH.exists():
-            return None
-        try:
-            nw = NextWeekPredictor.load(NEXT_WEEK_MODEL_PATH)
-            nw.model_type = NEXT_WEEK_MODEL_TYPE
-            return nw
-        except Exception as exc:                      # noqa: BLE001
-            logger.warning("Không đọc được next_week model %s (%s).", NEXT_WEEK_MODEL_PATH, exc)
-            return None
 
     # ── Vòng train nền ───────────────────────────────────────────────────
 
@@ -276,7 +250,6 @@ class CFModelService:
         """Thời điểm model đang phục vụ được ghi ra đĩa; None nếu chưa có model hoặc thiếu model con."""
         if self._bundle is None:
             return None
-        mtimes: list[float] = []
         rec_mtime = None
         for path in (HYBRID_MODEL_PATH, MODEL_PATH):
             if path.exists():
@@ -284,15 +257,8 @@ class CFModelService:
                 break
         if rec_mtime is None:
             return None
-        mtimes.append(rec_mtime)
 
-        if NEXT_WEEK_ENABLED:
-            if not NEXT_WEEK_MODEL_PATH.exists():
-                return None
-            mtimes.append(NEXT_WEEK_MODEL_PATH.stat().st_mtime)
-
-        # Lấy mtime nhỏ nhất: nếu một trong hai model chưa train hoặc cũ hơn mốc, coi như cần train bù
-        return datetime.fromtimestamp(min(mtimes), tz)
+        return datetime.fromtimestamp(rec_mtime, tz)
 
     async def train_once(self) -> ModelBundle | None:
         """Một chu kỳ: lấy dữ liệu -> train -> tính sẵn -> đổi bản."""
@@ -328,7 +294,6 @@ class CFModelService:
             purchase_events=events,
             category_half_life=self._get_category_half_life(),
         )
-        next_week = self._fit_next_week(events, features, errors)
 
         cache = (
             _precompute(model, PRECOMPUTE_TOP_K, PRECOMPUTE_BUDGET_SECONDS)
@@ -336,14 +301,10 @@ class CFModelService:
         )
 
         stats = dict(model.summary())
-        if next_week is not None:
-            stats.update(next_week.summary())
-
         self._version += 1
         new_bundle = ModelBundle(
             model=model,
             cache=cache,
-            next_week=next_week,
             source=source,
             version=self._version,
             stats=stats,
@@ -371,8 +332,6 @@ class CFModelService:
         del previous
 
         self._persist(model)
-        if next_week is not None:
-            self._persist_next_week(next_week)
 
         logger.info(
             "Bản train #%d sẵn sàng sau %.1fs — %d khách, %d sản phẩm CF, %d tương tác, "
@@ -440,8 +399,8 @@ class CFModelService:
     def _load_purchase_events(
         self, errors: list[str], fallback_df: pd.DataFrame | None = None
     ) -> pd.DataFrame | None:
-        """Lịch sử mua theo đơn cho kênh mua lại và dự đoán tuần tới. Lỗi thì rơi về dữ liệu fallback."""
-        if (REPEAT_SCORE != "order_freq" and not NEXT_WEEK_ENABLED):
+        """Lịch sử mua theo đơn cho kênh mua lại. Lỗi thì rơi về dữ liệu fallback."""
+        if REPEAT_SCORE != "order_freq":
             return None
         if clickhouse.is_configured():
             try:
@@ -473,40 +432,6 @@ class CFModelService:
 
         return None
 
-    @staticmethod
-    def _fit_next_week(
-        events: pd.DataFrame | None,
-        features: pd.DataFrame | None,
-        errors: list[str],
-    ) -> NextWeekPredictor | None:
-        if not NEXT_WEEK_ENABLED or events is None or events.empty:
-            return None
-        try:
-            prod_cats = None
-            if features is not None and not features.empty and "ParentCategory" in features.columns:
-                prod_cats = dict(
-                    zip(features["ProductID"].astype(str), features["ParentCategory"].fillna("").astype(str))
-                )
-            elif "ParentCategory" in events.columns:
-                prod_cats = dict(
-                    zip(events["ProductID"].astype(str), events["ParentCategory"].fillna("").astype(str))
-                )
-            return NextWeekPredictor(
-                model_type=NEXT_WEEK_MODEL_TYPE,
-                reference_mode=NEXT_WEEK_REFERENCE_MODE,
-            ).fit(events, product_categories=prod_cats)
-        except Exception as exc:                      # noqa: BLE001
-            errors.append(f"Lỗi train mô hình dự đoán 7 ngày tới: {exc}")
-            logger.warning("%s", errors[-1])
-            return None
-
-    def _persist_next_week(self, predictor: NextWeekPredictor) -> None:
-        try:
-            predictor.save(NEXT_WEEK_MODEL_PATH)
-            logger.info("Đã lưu next_week predictor model ra %s", NEXT_WEEK_MODEL_PATH)
-        except Exception as exc:                      # noqa: BLE001
-            logger.warning("Không lưu được next_week model ra đĩa: %s", exc)
-
     def _persist(self, model: HybridRecommender) -> None:
         """Ghi model ra đĩa để lần khởi động sau phục vụ được ngay.
 
@@ -536,12 +461,12 @@ class CFModelService:
                 customers=0, products=0, interactions=0, version=API_VERSION,
                 last_error=self._last_error,
             )
-        model_loaded = (bundle.model is not None or bundle.next_week is not None)
+        model_loaded = bundle.model is not None
         return HealthResponse(
             status="ok", model_name=MODEL_NAME, model_loaded=model_loaded,
-            customers=int(bundle.stats.get("customers", bundle.stats.get("next_week_customers", 0))),
+            customers=int(bundle.stats.get("customers", 0)),
             products=int(bundle.stats.get("products", 0)),
-            interactions=int(bundle.stats.get("interactions", bundle.stats.get("next_week_pairs", 0))),
+            interactions=int(bundle.stats.get("interactions", 0)),
             version=API_VERSION,
             model_version=bundle.version,
             trained_at=bundle.trained_at.isoformat(),
@@ -552,8 +477,6 @@ class CFModelService:
             content_based=bool(bundle.stats.get("content_based", 0)),
             repeat_model=bool(bundle.stats.get("repeat_model", 0)),
             behavior=bool(bundle.stats.get("behavior", 0)),
-            next_week_model=bundle.next_week is not None,
-            next_week_model_type=(bundle.next_week.model_type if bundle.next_week is not None else None),
             last_error=self._last_error,
         )
 
@@ -652,66 +575,3 @@ class CFModelService:
         )
         return self._response(cid, items)
 
-    @staticmethod
-    def _next_week_response(
-        cid: str,
-        horizon_days: int,
-        model_type: str | None,
-        items: list[dict],
-    ) -> NextWeekPredictionResponse:
-        return NextWeekPredictionResponse(
-            customer_id=cid,
-            horizon_days=int(horizon_days),
-            model_type=model_type,
-            predictions=[NextWeekPredictionItem(**row) for row in items],
-        )
-
-    def predict_next_week(
-        self,
-        customer_id: str,
-        top_k: int = 10,
-        horizon_days: int = 7,
-        min_prob: float = 0.05,
-        model_type: str | None = None,
-    ) -> NextWeekPredictionResponse:
-        """Dự đoán các sản phẩm khách có xác suất mua lại cao nhất trong W ngày tới."""
-        bundle = self._bundle
-        cid = str(customer_id)
-        if bundle is None or bundle.next_week is None:
-            return self._next_week_response(cid, horizon_days, model_type or NEXT_WEEK_MODEL_TYPE, [])
-
-        chosen = model_type or bundle.next_week.model_type
-        items = bundle.next_week.predict(
-            customer_id=cid,
-            top_k=top_k,
-            horizon_days=horizon_days,
-            min_prob=min_prob,
-            model_type=chosen,
-        )
-        return self._next_week_response(cid, horizon_days, chosen, items)
-
-    def predict_next_week_realtime(
-        self,
-        customer_id: str,
-        purchased_product_ids: list[str],
-        top_k: int = 10,
-        horizon_days: int = 7,
-        min_prob: float = 0.05,
-        model_type: str | None = None,
-    ) -> NextWeekPredictionResponse:
-        """Dự đoán W ngày tới có gộp đơn mua trong ngày (DaysSince = 0)."""
-        bundle = self._bundle
-        cid = str(customer_id)
-        if bundle is None or bundle.next_week is None:
-            return self._next_week_response(cid, horizon_days, model_type or NEXT_WEEK_MODEL_TYPE, [])
-
-        chosen = model_type or bundle.next_week.model_type
-        items = bundle.next_week.predict_realtime(
-            customer_id=cid,
-            purchased_product_ids=purchased_product_ids,
-            top_k=top_k,
-            horizon_days=horizon_days,
-            min_prob=min_prob,
-            model_type=chosen,
-        )
-        return self._next_week_response(cid, horizon_days, chosen, items)

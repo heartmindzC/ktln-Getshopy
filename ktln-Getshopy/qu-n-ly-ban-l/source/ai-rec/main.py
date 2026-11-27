@@ -49,32 +49,6 @@ def display_customer_recommendations(
         print(f"   {rank:2d}. [{product_id}] {prod_name:<48} | {category:<10} | Đơn giá: {price:,.0f} VNĐ | Score: {score:.4f}")
 
 
-def display_next_week_predictions(customer_id: str, top_k: int) -> None:
-    """Hiển thị dự đoán các sản phẩm khách có xác suất mua trong 7 ngày tới."""
-    from config import NEXT_WEEK_MODEL_PATH
-    from models.next_week import NextWeekPredictor
-    if not NEXT_WEEK_MODEL_PATH.exists():
-        print("\n⚠️ Chưa có artifact Next-Week Predictor trên đĩa (chạy với --train-next-week để huấn luyện).")
-        return
-    try:
-        nw = NextWeekPredictor.load(NEXT_WEEK_MODEL_PATH)
-        preds = nw.predict(customer_id, top_k=top_k, horizon_days=7)
-        print(f"\n🔮 DỰ ĐOÁN MUA LẶP LẠI TRONG 7 NGÀY TỚI (NEXT-WEEK AI):")
-        if not preds:
-            print(f"   Không có sản phẩm nào vượt ngưỡng xác suất mua trong 7 ngày tới cho khách {customer_id!r}.")
-            return
-        for rank, item in enumerate(preds, start=1):
-            pid = item["product_id"]
-            prob = item["purchase_probability"] * 100
-            count = item["purchase_count"]
-            days = item["days_since_last_purchase"]
-            cycle = item.get("expected_cycle_days")
-            cycle_str = f"{cycle:.1f} ngày" if cycle else "N/A"
-            print(f"   {rank:2d}. [{pid}] Xác suất: {prob:5.1f}% | Đã mua: {count} lần | Cách đây: {days} ngày | Chu kỳ: {cycle_str}")
-    except Exception as exc:
-        print(f"⚠️ Không thể tải mô hình Next-Week: {exc}")
-
-
 def display_invoice_recommendations(
     model: CollaborativeFiltering, invoice_id: str, top_k: int
 ) -> None:
@@ -155,53 +129,19 @@ def main() -> None:
         action="store_true",
         help="Bỏ qua artifact hiện có và huấn luyện lại mô hình.",
     )
-    parser.add_argument(
-        "--train-next-week",
-        action="store_true",
-        help="Huấn luyện mô hình Next-Week Predictor và lưu artifact ra đĩa.",
-    )
-    parser.add_argument(
-        "--next-week",
-        action="store_true",
-        help="Hiển thị thêm dự đoán mua lặp lại trong 7 ngày tới khi tra cứu khách hàng.",
-    )
     args = parser.parse_args()
 
     # --------------------------------------------------------------------------
     # 2. Tải hoặc huấn luyện mô hình AI
     # --------------------------------------------------------------------------
     model = CollaborativeFiltering()
-    if args.load_model or (model.model_path.exists() and not args.retrain and not args.train_next_week):
+    if args.load_model or (model.model_path.exists() and not args.retrain):
         model.load_model()
-    elif not args.train_next_week:
+    else:
         print("Huấn luyện mô hình COLLABORATIVE FILTERING...")
         model.train()
         model.save_model()
         print(f"Mô hình đã được lưu tại: {model.model_path}")
-
-    # Huấn luyện Next-Week Predictor nếu được yêu cầu qua --train-next-week hoặc --retrain
-    if args.train_next_week or args.retrain:
-        from config import NEXT_WEEK_MODEL_PATH
-        print("Huấn luyện mô hình NEXT-WEEK PREDICTOR...")
-        try:
-            from api.service import CFModelService
-            service = CFModelService.get_instance()
-            df, _ = service._load_frame()
-            if df is not None and not df.empty:
-                errors: list[str] = []
-                events = service._load_purchase_events(errors, fallback_df=df)
-                features, _ = service._load_content(errors)
-                nw = service._fit_next_week(events, features, errors)
-                if nw is not None:
-                    service._persist_next_week(nw)
-                    print(f"Mô hình Next-Week đã được lưu tại: {NEXT_WEEK_MODEL_PATH}")
-                    print(f"📊 Thông số Next-Week: {nw.summary()}")
-                else:
-                    print("⚠️ Không đủ dữ liệu purchase_events để huấn luyện Next-Week Predictor.")
-            else:
-                print("⚠️ Không tìm thấy dữ liệu đơn hàng để huấn luyện Next-Week.")
-        except Exception as exc:
-            print(f"⚠️ Lỗi khi huấn luyện Next-Week Predictor: {exc}")
 
     # --------------------------------------------------------------------------
     # 3. Xử lý luồng tương tác nhập mã khách hàng nếu không truyền CLI argument
@@ -237,8 +177,6 @@ def main() -> None:
 
             if customer_id:
                 display_customer_recommendations(model, customer_id, top_k=args.top_k)
-                if args.next_week:
-                    display_next_week_predictions(customer_id, top_k=args.top_k)
             elif invoice_id:
                 display_invoice_recommendations(model, invoice_id, top_k=args.top_k)
 
@@ -247,8 +185,6 @@ def main() -> None:
     # --------------------------------------------------------------------------
     if customer_id:
         display_customer_recommendations(model, customer_id, top_k=args.top_k)
-        if args.next_week:
-            display_next_week_predictions(customer_id, top_k=args.top_k)
     elif invoice_id:
         display_invoice_recommendations(model, invoice_id, top_k=args.top_k)
 

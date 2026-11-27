@@ -20,6 +20,7 @@
    - 4.3 [Phân luồng theo loại khách](#43-phân-luồng-theo-loại-khách)
    - 4.4 [Gợi ý realtime — đơn mua sau lần train](#44-gợi-ý-realtime--đơn-mua-sau-lần-train)
    - 4.5 [Gợi ý realtime kết hợp hành vi trong phiên](#45-gợi-ý-realtime-kết-hợp-hành-vi-trong-phiên)
+   - 4.6 [Dự đoán sản phẩm mua lại trong 7 ngày tới](#46-dự-đoán-sản-phẩm-mua-lại-trong-7-ngày-tới)
 5. [Xử lý lỗi và dự phòng](#5-xử-lý-lỗi-và-dự-phòng)
 6. [Endpoint Health](#6-endpoint-health)
 7. [Tương tác với hệ thống khác](#7-tương-tác-với-hệ-thống-khác)
@@ -254,7 +255,7 @@ _train_sync() được gọi bởi asyncio.to_thread()
          │
          ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ BƯỚC 5: Dựng Hybrid Recommender                                │
+│ BƯỚC 5: Dựng Hybrid Recommender & Next-Week Predictor           │
 │                                                                  │
 │   model = build_recommender(                                    │
 │       cf, features, signals, current_params(),                  │
@@ -282,7 +283,7 @@ _train_sync() được gọi bởi asyncio.to_thread()
          │
          ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ BƯỚC 7: Đổi bản nguyên tử + lưu đĩa                          │
+│ BƯỚC 7: Đổi bản nguyên tử + lưu model ra đĩa                   │
 │                                                                  │
 │   self._bundle = new_bundle  # atomic (Python GIL)              │
 │   self._persist(model)                                         │
@@ -380,6 +381,8 @@ def _precompute(model, top_k, budget_s):
 | `GET` | `/api/v1/recommend/customer/{customer_id}?top_k=10` | Gợi ý top-K cho khách |
 | `POST` | `/api/v1/recommend/realtime` | Như GET, có ghép đơn mua sau lần train — §4.4 |
 | `POST` | `/api/v1/recommend/realtime-behavior` | Gợi ý realtime kết hợp cả đơn mua và tương tác hành vi duyệt web (view, dwell, cart, wish) — §4.5 |
+| `GET` | `/api/v1/predict/next-week/customer/{customer_id}?top_k=10&horizon_days=7&min_prob=0.05` | Dự đoán xác suất khách mua lại từng món trong $W$ ngày tới — §4.6 |
+| `POST` | `/api/v1/predict/next-week` | Như GET `/predict/next-week`, ghép thêm đơn mua trong ngày (`DaysSince = 0`) — §4.6 |
 | `GET` | `/docs` | Swagger UI |
 | `GET` | `/redoc` | ReDoc UI |
 
@@ -673,6 +676,34 @@ rời trang chi tiết rồi quay về trang chủ (điều hướng SPA) thư�
 gợi ý; tương tác trên món đã có trong hồ sơ bản train bị AI-Rec bỏ qua (giữ trọng số đã học); món mới
 ngoài không gian CF không đổi được gì; món vừa xem/thêm giỏ thường lên đầu danh sách vì tự tương
 đồng với chính nó (thiết kế "vẫn được gợi ý lại" của endpoint).
+
+### 4.6 Dự đoán sản phẩm mua lại trong 7 ngày tới
+
+> *(26/11/2026 — Kiến trúc Microservices)*: Kênh dự đoán xác suất mua lặp lại 7 ngày tới đã được tách thành **Microservice độc lập `ai-next-week`** (cổng nội bộ 8002, mã nguồn tại `qu-n-ly-ban-l/source/ai-next-week`). Service `ai-rec` chỉ tập trung phục vụ hệ thống gợi ý sản phẩm (CF, Content-Based, Hybrid, Realtime-Behavior).
+>
+> *(23/11/2026 — Phương án A, xem source tại `ai-next-week`)* Khác với kênh gợi ý (`/recommend/*`, xếp hạng tương đối), hai endpoint dự đoán trả về **xác suất hiệu chỉnh $P \in [0, 1]$** khách $u$ sẽ mua lại sản phẩm $i$ trong cửa sổ $W = \text{horizon\_days}$ (mặc định 7 ngày) tới, dựa trên lịch sử mua ở mức đơn hàng (`serving.purchase_events_for_AI_rec` + `ParentCategory` từ `serving.catalog_features`).
+
+* **`GET /api/v1/predict/next-week/customer/{customer_id}`:** Query params `top_k` (1–50, mặc định `10`), `horizon_days` (1–90, mặc định `7`), `min_prob` (0–1, mặc định `0.05`), `model_type` (`poisson_gamma` | `ipt_hazard`, tuỳ chọn ghi đè).
+* **`POST /api/v1/predict/next-week`:** Body `{customer_id, purchased_product_ids: [...], top_k?, horizon_days?, min_prob?, model_type?}` — gộp thêm đơn khách vừa mua hôm nay (`DaysSince = 0`) lúc suy luận mà không train lại.
+
+**Hai biến thể xác suất hỗ trợ:**
+
+1. **A1 — Modified Poisson–Gamma (`poisson_gamma`, mặc định sau benchmark):**  
+   Ước lượng Gamma prior $(\alpha_c, \beta_c)$ theo từng `ParentCategory` bằng Method of Moments, cập nhật hậu nghiệm theo số lần mua lại $x = k - 1$ trong khoảng quan sát $T_{\text{obs}}$ (Bhagat et al., 2018; Fader et al., 2005):
+   $$P(N_W \ge 1 \mid x, T_{\text{obs}}) = 1 - \left(\frac{\beta_c + T_{\text{obs}}}{\beta_c + T_{\text{obs}} + W}\right)^{\alpha_c + x}$$
+2. **A2 — Log-Normal IPT Hazard (`ipt_hazard`):**  
+   Ước lượng chu kỳ giữa các lần mua $\Delta t \sim \text{LogNormal}(\hat{\mu}_{ui}, \hat{\sigma}_{ui}^2)$ có co rút Empirical Bayes về danh mục, nhân xác suất mua lặp lại $p_{\text{repeat}}(u, i)$ (Wang & Zhang, 2013):
+   $$P(u, i, W) = p_{\text{repeat}}(u, i) \cdot \frac{F(t_0 + W) - F(t_0)}{1 - F(t_0)}$$
+
+**Benchmark đối chứng trên `evaluation/data/order_lines.csv`** (6.373.091 sự kiện đơn hàng, chia Temporal Split — chi tiết tại `evaluation/results/benchmark_next_week.md`):
+
+| Mô hình | Test ROC-AUC ↑ | Test PR-AUC ↑ | Test Brier ↓ | Test Recall@10 ↑ | Test HitRate@10 ↑ |
+|---|---:|---:|---:|---:|---:|
+| RepeatBaseline (hl=37d) | 0.6960 | 0.0810 | 0.08377 | 0.3280 | 0.5769 |
+| **A1: Poisson-Gamma** *(mặc định)* | **0.7488** | **0.0993** | **0.01329** | **0.4024** | **0.6634** |
+| A2: IPT LogNormal Hazard | 0.7424 | 0.0950 | 0.01347 | 0.3889 | 0.6478 |
+
+**Giới hạn phạm vi (Phương án A):** Chỉ dự đoán sản phẩm khách **đã từng mua**; khách hoàn toàn mới ($k = 0$, không gửi `purchased_product_ids`) trả danh sách rỗng `[]`. Khi chạy trên tập dữ liệu demo đóng băng mốc thời gian, đặt `NEXT_WEEK_REFERENCE_MODE=max_date` để dịch `DaysSince` về ngày đơn hàng mới nhất.
 
 ---
 

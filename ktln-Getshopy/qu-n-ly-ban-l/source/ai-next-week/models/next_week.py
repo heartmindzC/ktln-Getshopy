@@ -569,6 +569,37 @@ class NextWeekPredictor:
             reason=chosen,
         )
 
+    def get_purchase_history(
+        self,
+        customer_id: str,
+        limit: int = 50,
+    ) -> tuple[int, list[dict[str, Any]]]:
+        """Trả về (tổng số món đã mua, danh sách món mua gần đây nhất: product_id, days_since_last_purchase, purchase_count)."""
+        uidx = self._user_map.get(str(customer_id))
+        if uidx is None:
+            return 0, []
+        s = int(self._user_indptr[uidx])
+        e = int(self._user_indptr[uidx + 1])
+        total = e - s
+        if total <= 0:
+            return 0, []
+
+        pids = self._item_vocab[self._pair_item_idx[s:e]]
+        t_lasts = self._t_last[s:e]
+        counts = self._counts[s:e]
+
+        # Sắp xếp: ngày mua gần đây nhất trước (t_last nhỏ nhất trước), nếu hòa thì số lần mua nhiều hơn
+        order = sorted(range(total), key=lambda i: (float(t_lasts[i]), -int(counts[i]), str(pids[i])))[:limit]
+        items = [
+            {
+                "product_id": str(pids[i]),
+                "days_since_last_purchase": int(round(float(t_lasts[i]))),
+                "purchase_count": int(counts[i]),
+            }
+            for i in order
+        ]
+        return total, items
+
     def customers(self) -> set[str]:
         return set(self._user_map)
 

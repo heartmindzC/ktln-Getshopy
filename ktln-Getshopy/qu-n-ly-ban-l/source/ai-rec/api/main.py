@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import logging
+import os
 from typing import AsyncIterator, Literal
 
 from fastapi import FastAPI, HTTPException, Path, Query
@@ -13,16 +14,12 @@ from fastapi.responses import RedirectResponse
 from api.schemas import (
     CustomerRecommendationResponse,
     HealthResponse,
-    NextWeekPredictionResponse,
-    NextWeekRealtimePredictionRequest,
     RealtimeBehaviorRecommendationRequest,
     RealtimeRecommendationRequest,
 )
 from api.service import CFModelService
 from config import (
     DEFAULT_TOP_K,
-    NEXT_WEEK_DEFAULT_HORIZON_DAYS,
-    NEXT_WEEK_DEFAULT_MIN_PROB,
     TRAIN_DAILY_AT,
     TRAIN_INITIAL_DELAY_SECONDS,
     TRAIN_INTERVAL_SECONDS,
@@ -70,6 +67,11 @@ app = FastAPI(
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
+    root_path=os.getenv("ROOT_PATH", "/ai-rec"),
+    servers=[
+        {"url": "/ai-rec", "description": "Gateway Reverse Proxy"},
+        {"url": "/", "description": "Direct Container Port 8000"},
+    ],
 )
 
 # Enable CORS for frontend integrations
@@ -189,76 +191,13 @@ def recommend_realtime_behavior(body: RealtimeBehaviorRecommendationRequest) -> 
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.get(
-    "/api/v1/predict/next-week/customer/{customer_id}",
-    response_model=NextWeekPredictionResponse,
-    tags=["Predictions"],
-    summary="Predict products a customer is likely to buy in the next W days",
-    description=(
-        "Estimates calibrated repeat-purchase probabilities over the next `horizon_days` (default 7) "
-        "from order-level purchase history using Empirical Bayes Poisson-Gamma or Log-Normal IPT Hazard."
-    ),
-)
-def predict_next_week_for_customer(
-    customer_id: str = Path(..., description="ID của khách hàng (CustomerID)"),
-    top_k: int = Query(DEFAULT_TOP_K, ge=1, le=50, description="Số sản phẩm trả về tối đa"),
-    horizon_days: int = Query(
-        NEXT_WEEK_DEFAULT_HORIZON_DAYS, ge=1, le=90, description="Cửa sổ dự đoán (ngày, mặc định 7)"
-    ),
-    min_prob: float = Query(
-        NEXT_WEEK_DEFAULT_MIN_PROB, ge=0.0, le=1.0, description="Ngưỡng xác suất tối thiểu"
-    ),
-    model_type: Literal["poisson_gamma", "ipt_hazard"] | None = Query(
-        None, description="Tuỳ chọn ghi đè biến thể mô hình: poisson_gamma | ipt_hazard"
-    ),
-) -> NextWeekPredictionResponse:
-    service = CFModelService.get_instance()
-    try:
-        return service.predict_next_week(
-            customer_id=customer_id,
-            top_k=top_k,
-            horizon_days=horizon_days,
-            min_prob=min_prob,
-            model_type=model_type,
-        )
-    except Exception as exc:
-        logger.error("Error predicting next-week purchases for customer %s: %s", customer_id, exc)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post(
-    "/api/v1/predict/next-week",
-    response_model=NextWeekPredictionResponse,
-    tags=["Predictions"],
-    summary="Predict next-week purchases, folding in same-day purchases",
-    description=(
-        "Same probabilistic repeat-purchase timing model as GET /api/v1/predict/next-week/customer/{customer_id}, "
-        "folding in `purchased_product_ids` bought today (DaysSince = 0) at inference time without retraining."
-    ),
-)
-def predict_next_week_realtime(body: NextWeekRealtimePredictionRequest) -> NextWeekPredictionResponse:
-    service = CFModelService.get_instance()
-    try:
-        return service.predict_next_week_realtime(
-            customer_id=body.customer_id,
-            purchased_product_ids=body.purchased_product_ids,
-            top_k=body.top_k,
-            horizon_days=body.horizon_days,
-            min_prob=body.min_prob,
-            model_type=body.model_type,
-        )
-    except Exception as exc:
-        logger.error("Error predicting realtime next-week purchases for customer %s: %s", body.customer_id, exc)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
 @app.post(
     "/api/v1/train",
     tags=["System"],
-    summary="Trigger immediate retraining for both Recommendation and Next-Week models",
+    summary="Trigger immediate retraining for Recommendation model",
     description=(
-        "Kích hoạt một chu kỳ huấn luyện lại ngay lập tức cho cả hai mô hình "
-        "(Hybrid Recommender và Next-Week Repeat Predictor), cập nhật cache và lưu artifact ra đĩa."
+        "Kích hoạt một chu kỳ huấn luyện lại ngay lập tức cho mô hình gợi ý "
+        "(Hybrid Recommender), cập nhật cache và lưu artifact ra đĩa."
     ),
 )
 async def trigger_training() -> dict:
@@ -272,7 +211,7 @@ async def trigger_training() -> dict:
             }
         return {
             "status": "ok",
-            "message": "Đã hoàn thành chu kỳ huấn luyện và lưu cả 2 mô hình.",
+            "message": "Đã hoàn thành chu kỳ huấn luyện và lưu mô hình gợi ý.",
             "version": bundle.version,
             "source": bundle.source,
             "trained_at": bundle.trained_at.isoformat(),
