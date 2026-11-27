@@ -116,6 +116,33 @@ async function convertTransferToCod(tx, orderId) {
 }
 
 /**
+ * Quản trị viên bàn giao đơn cho vận chuyển: CONFIRMED -> SHIPPING (27/11/2026).
+ *
+ * Chỉ đơn CONFIRMED (đã thu tiền chuyển khoản, hoặc COD) mới đi giao được: đơn
+ * PENDING_PAYMENT còn chờ tiền, DELIVERED / CANCELLED đã xong. Từ SHIPPING khách
+ * không tự huỷ được nữa (POST /b2c/orders/:id/cancel chặn sẵn), quản trị viên vẫn
+ * huỷ được khi giao thất bại (cancelOrder trả kho) hoặc đánh dấu đã giao.
+ *
+ * Kho, điểm, voucher không đổi: kho đã trừ thật lúc CONFIRMED, điểm cộng lúc DELIVERED.
+ *
+ * Cập nhật CÓ ĐIỀU KIỆN (WHERE status = 'CONFIRMED') thay vì đọc rồi ghi: hai yêu cầu
+ * cùng lúc (bấm hai lần, hoặc khách huỷ đúng lúc đó) thì chỉ một bên đổi được trạng thái.
+ * Idempotent: đơn đã SHIPPING thì không làm gì.
+ */
+async function markShipping(tx, orderId) {
+  const updated = await tx.order.updateMany({
+    where: { id: orderId, status: 'CONFIRMED' },
+    data: { status: 'SHIPPING' },
+  });
+  if (updated.count === 1) return { changed: true };
+
+  const order = await tx.order.findUnique({ where: { id: orderId }, select: { status: true } });
+  if (!order) throw new Error(`Không tìm thấy đơn ${orderId}`);
+  if (order.status === 'SHIPPING') return { changed: false };
+  throw new Error(`Chỉ chuyển sang đang giao được đơn đã xác nhận (đơn đang ở trạng thái ${order.status})`);
+}
+
+/**
  * Đơn đã giao tới tay khách. Đây mới là lúc tích điểm.
  *
  * Tách khỏi commitOrder vì hai sự kiện khác nhau: "đã trả tiền" không đồng
@@ -374,6 +401,6 @@ async function cancelOrder(tx, orderId, { reason = null, cancelledBy = null } = 
 
 module.exports = {
   commitOrder, convertTransferToCod, adjustOrderSold,
-  expireOrder, expireOverdueOrders, cancelOrder, markDelivered,
+  expireOrder, expireOverdueOrders, cancelOrder, markDelivered, markShipping,
   POINT_EARN_PER_VND,
 };
