@@ -4,6 +4,10 @@ import { PlusOutlined, EditOutlined, DeleteOutlined, UploadOutlined, StopOutline
 import { api } from '../services/api';
 import { fullNameRules, phoneRules } from '../utils/validators';
 import dayjs from 'dayjs';
+import OrderManagementTab from '../components/admin/OrderManagementTab';
+
+// Tab "Đơn hàng" (27/11/2026): tự nạp dữ liệu của mình, không có nút "Thêm mới".
+const ORDERS_TAB = '6';
 
 // Trần điểm khi quản trị nhập — cùng số với LOYALTY_POINTS_MAX ở server/src/services/customerAdmin.js.
 const LOYALTY_POINTS_MAX = 1000000;
@@ -587,14 +591,17 @@ export default function GeneralManagement() {
     <div style={{ padding: 24 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <h2>Quản lý chung</h2>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => (activeTab === '5' ? openCustomerModal() : openModal())}>
-          Thêm mới
-        </Button>
+        {activeTab !== ORDERS_TAB && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => (activeTab === '5' ? openCustomerModal() : openModal())}>
+            Thêm mới
+          </Button>
+        )}
       </div>
 
       <Tabs activeKey={activeTab} onChange={setActiveTab} items={[
         { key: '1', label: 'Chi nhánh', children: <Table dataSource={branches} columns={branchColumns} rowKey="id" loading={loading} /> },
         { key: '4', label: 'Thương hiệu', children: <Table dataSource={brands} columns={brandColumns} rowKey="id" loading={loading} /> },
+        { key: ORDERS_TAB, label: 'Đơn hàng', children: <OrderManagementTab /> },
         { key: '5', label: 'Khách hàng', children: (
           <>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center', marginBottom: 12 }}>
