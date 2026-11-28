@@ -138,6 +138,16 @@ export const api = {
 
   // ─── B2B APIs ────────────────────────────────────────────────
   b2b: {
+    // Quản lý đơn hàng (27/11/2026) — tab "Đơn hàng" trong Quản lý chung. Phân trang ở máy chủ,
+    // trả { data, total, page, limit }. q: mã đơn, mã khách (chữ số) hoặc email khách.
+    // "Đã giao" dùng api.payments.markDelivered (route có sẵn).
+    getOrders: ({ page = 1, limit = 20, status = 'all', payment_status = 'all', payment_method = 'all',
+      date_from = '', date_to = '', q = '' } = {}) =>
+      request('/b2b/orders?' + new URLSearchParams({ page, limit, status, payment_status, payment_method, date_from, date_to, q })),
+    getOrder: (id) => request(`/b2b/orders/${encodeURIComponent(id)}`),
+    shipOrder: (id) => request(`/b2b/orders/${encodeURIComponent(id)}/shipping`, { method: 'POST' }),
+    cancelOrder: (id, reason) =>
+      request(`/b2b/orders/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: JSON.stringify({ reason }) }),
     // Phân trang ở máy chủ — trả { data, total, page, limit }
     // status: all | active | inactive (16/11/2026)
     getCustomers: ({ page = 1, limit = 20, search = '', status = 'all' } = {}) =>

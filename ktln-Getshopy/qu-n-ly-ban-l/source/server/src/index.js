@@ -1006,6 +1006,11 @@ app.use('/api/b2b', requireAdmin);
 const b2bRouter = require('./routes/b2b');
 app.use('/api/b2b', b2bRouter);
 
+// ─── QUẢN LÝ ĐƠN HÀNG (tab "Đơn hàng" trong Quản lý chung, 27/11/2026) ──
+// Sau requireAdmin ở trên. /orders/:id/delivered vẫn ở payment.js (mount sớm hơn).
+const adminOrdersRouter = require('./routes/adminOrders');
+app.use('/api/b2b', adminOrdersRouter);
+
 // ─── AI ADMIN ROUTES (MLOps — ChatLog quản lý & trigger train) ──
 const aiAdminRouter = require('./routes/aiAdmin');
 app.use('/api/b2b', aiAdminRouter);
