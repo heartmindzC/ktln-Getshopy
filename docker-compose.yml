@@ -483,9 +483,15 @@ services:
   # Nhẹ hơn Airflow rất nhiều — quy mô này chưa cần DAG, retry policy hay
   # backfill.
   #
-  # `dbt build` chứ không `dbt run`: build = run + test, nên checksum 3 tầng
-  # chạy mỗi lượt và phát hiện lệch sớm. Chạy `run` là mất dữ liệu giữa đường
-  # mà không ai biết cho tới khi chạy test tay.
+  # `dbt build` chứ không `dbt run`: build = run + test, nên test dữ liệu chạy mỗi
+  # lượt. Chạy `run` là mất dữ liệu giữa đường mà không ai biết cho tới khi chạy
+  # test tay.
+  # Lệnh `scheduled` (scripts/dbt/entrypoint.sh, 27/11/2026): mỗi lượt build mọi
+  # model trừ tag audit; đối soát 3 tầng (audit.checksum_orders, tới 1,18 GiB RAM)
+  # chạy MỖI GIỜ, riêng một mình SAU khi build xong — không song song với model
+  # khác. Đổi chu kỳ đối soát: biến DBT_AUDIT_EVERY_MIN trong .env (mặc định 60).
+  # Đổi lệnh này thì phải build lại image trước (docker compose --profile dbt build
+  # dbt): image cũ không biết `scheduled` và mọi lượt sẽ lỗi.
   # Cần image kltn-dbt:latest (build tay: docker compose --profile dbt build dbt). KHÔNG đặt
   # depends_on dbt: dbt nằm trong profile, service thường phụ thuộc service có profile thì `up -d`
   # báo lỗi; thiếu image thì job ofelia báo "No such image" trong log scheduler.
@@ -501,7 +507,7 @@ services:
       ofelia.job-run.dbt-build.image: "kltn-dbt:latest"
       ofelia.job-run.dbt-build.network: "kltn_default"
       ofelia.job-run.dbt-build.volume: "${PWD}/local-infra-sandbox/dbt_warehouse:/dbt"
-      ofelia.job-run.dbt-build.command: "build"
+      ofelia.job-run.dbt-build.command: "scheduled"
       # Lượt trước chưa xong thì bỏ qua lượt này. Mặc định ofelia cho chạy chồng
       # (no-overlap = false): hai lượt cùng lúc là nhân đôi phần RAM ClickHouse
       # của dbt — benchmark 23/10, B6.
@@ -517,7 +523,8 @@ services:
         "MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:?thieu .env - xin file .env tu chu repo, dat o thu muc goc roi chay lai}","MINIO_SECRET_KEY=${MINIO_SECRET_KEY:?thieu .env - xin file .env tu chu repo, dat o thu muc goc roi chay lai}",
         "CDC_TOPIC_PREFIX=${CDC_TOPIC_PREFIX:-cdc_prod}",
         "PG_SOURCE_HOST=postgres","PG_SOURCE_PORT=5432","PG_SOURCE_DB=${POSTGRES_DB:-getshopy}",
-        "PG_SOURCE_USER=${POSTGRES_USER:-getshopy}","PG_SOURCE_PASSWORD=${POSTGRES_PASSWORD:?thieu .env - xin file .env tu chu repo, dat o thu muc goc roi chay lai}"]
+        "PG_SOURCE_USER=${POSTGRES_USER:-getshopy}","PG_SOURCE_PASSWORD=${POSTGRES_PASSWORD:?thieu .env - xin file .env tu chu repo, dat o thu muc goc roi chay lai}",
+        "AUDIT_EVERY_MIN=${DBT_AUDIT_EVERY_MIN:-60}"]
     restart: unless-stopped
 
   # ═══ GIÁM SÁT — Prometheus + Grafana (19/11/2026) ════════════════════════

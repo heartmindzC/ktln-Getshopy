@@ -4,7 +4,8 @@ models:
   - name: checksum_orders
     description: |
       Đối chiếu số lượng và tổng tiền giữa Postgres / staging / warehouse.
-      Chạy SAU dbt build. Lệch kéo dài nghĩa là CDC mất bản ghi.
+      Mỗi lần chạy nối thêm một dòng (lịch sử); lượt định kỳ chạy mỗi giờ, sau khi
+      các model khác build xong. Lệch kéo dài qua nhiều dòng nghĩa là CDC mất bản ghi.
     columns:
       - name: ket_qua
         description: "KHỚP hoặc LỆCH. LỆCH tạm thời là do sink chưa flush; LỆCH kéo dài là mất dữ liệu."

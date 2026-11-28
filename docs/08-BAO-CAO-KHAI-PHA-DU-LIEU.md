@@ -788,7 +788,7 @@ flowchart LR
 | Gold | `serving` | `catalog_features`, `product_features` | bảng | Đặc trưng nội dung |
 | Gold | `serving` | `customer_preference_signals` | bảng | Sở thích onboarding đã làm sạch |
 | Gold | `serving` | `customer_product_events` | bảng | Tổng hợp hành vi theo cặp khách–món |
-| Kiểm soát | `audit` | `checksum_orders` | bảng | Đối soát nguồn – hồ – kho |
+| Kiểm soát | `audit` | `checksum_orders` | bảng incremental (nối thêm mỗi giờ) | Đối soát nguồn – hồ – kho |
 
 **Hình 5.2.** Dòng phụ thuộc giữa các mô hình dbt (rút gọn)
 
