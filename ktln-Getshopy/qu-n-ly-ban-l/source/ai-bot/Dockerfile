@@ -1,7 +1,7 @@
 # ==============================================================================
 # Dockerfile for AI Bot (Chatbot + Search) — Node.js
 # ==============================================================================
-FROM node:20-bookworm-slim
+FROM node:20.20.2-bookworm-slim
 WORKDIR /app
 
 RUN apt-get update \

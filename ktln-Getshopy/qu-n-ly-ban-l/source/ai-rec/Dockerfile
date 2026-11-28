@@ -1,7 +1,7 @@
 # ==============================================================================
 # Multi-stage/Optimized Production Dockerfile for Recommendation API
 # ==============================================================================
-FROM python:3.11-slim
+FROM python:3.11.18-slim-trixie
 
 # Thiết lập các biến môi trường chuẩn cho Python container
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -41,7 +41,7 @@ COPY config.py main.py ./
 # trình chạy bằng appuser -> ghi model ra đĩa báo "Permission denied". Lỗi đó
 # không làm chết service (bản trong bộ nhớ vẫn dùng được) nên rất dễ bỏ sót:
 # nó chỉ hiện ra ở lần khởi động sau, khi không có gì để nạp lại.
-RUN mkdir -p /app/output/cf /app/output/hybrid /app/data/raw
+RUN mkdir -p /app/output/cf /app/output/hybrid /app/output/next_week /app/data/raw
 
 # Phân quyền cho appuser trên toàn bộ thư mục /app
 RUN chown -R appuser:appgroup /app

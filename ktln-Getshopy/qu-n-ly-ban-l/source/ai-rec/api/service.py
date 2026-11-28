@@ -14,6 +14,8 @@ import pandas as pd
 from api.schemas import (
     CustomerRecommendationResponse,
     HealthResponse,
+    NextWeekPredictionItem,
+    NextWeekPredictionResponse,
     RecommendationItem,
 )
 from config import (
@@ -28,6 +30,10 @@ from config import (
     HYBRID_MODEL_PATH,
     HYBRID_REPEAT_WEIGHT,
     MODEL_PATH,
+    NEXT_WEEK_ENABLED,
+    NEXT_WEEK_MODEL_PATH,
+    NEXT_WEEK_MODEL_TYPE,
+    NEXT_WEEK_REFERENCE_MODE,
     PRECOMPUTE_BUDGET_SECONDS,
     PRECOMPUTE_ENABLED,
     PRECOMPUTE_TOP_K,
@@ -42,6 +48,7 @@ from data_source import clickhouse
 from models.behavior import BehaviorConfig
 from models.cf_recommendation import CollaborativeFiltering
 from models.hybrid import HybridParams, HybridRecommender, build_recommender
+from models.next_week import NextWeekPredictor
 
 logger = logging.getLogger(__name__)
 
@@ -77,16 +84,17 @@ class ModelBundle:
     thì không tồn tại trạng thái lai đó.
     """
 
-    model: HybridRecommender
+    model: HybridRecommender | None = None
     # khách -> [(product_id, lý do)]
     cache: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    next_week: NextWeekPredictor | None = None
     trained_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     source: str = "unknown"
     version: int = 0
-    stats: dict[str, int] = field(default_factory=dict)
+    stats: dict[str, int | str] = field(default_factory=dict)
 
 
-def _precompute(model: HybridRecommender, top_k: int, budget_s: float) -> dict[str, list[tuple[str, str]]]:
+def _precompute(model: HybridRecommender | None, top_k: int, budget_s: float) -> dict[str, list[tuple[str, str]]]:
     """Tính sẵn top-K cho mọi khách có tín hiệu riêng (đã mua hoặc đã làm onboarding).
 
     Vì sao lặp từng khách chứ không nhân ma trận một lần: ma trận điểm đầy đủ
@@ -98,6 +106,8 @@ def _precompute(model: HybridRecommender, top_k: int, budget_s: float) -> dict[s
     Có trần thời gian: quá hạn thì dừng, phần khách còn lại rơi về tính tại
     chỗ. Thà cache một phần còn hơn để một chu kỳ train tràn sang chu kỳ sau.
     """
+    if model is None:
+        return {}
     cache: dict[str, list[tuple[str, str]]] = {}
     started = time.monotonic()
     customers = model.known_customers()
@@ -156,16 +166,23 @@ class CFModelService:
             return
 
         loaded = self._load_from_disk()
-        if loaded is not None:
+        next_week = self._load_next_week_from_disk()
+        if loaded is not None or next_week is not None:
+            stats: dict[str, int | str] = {}
+            if loaded is not None:
+                stats.update(loaded.summary())
+            if next_week is not None:
+                stats.update(next_week.summary())
             self._version += 1
             self._bundle = ModelBundle(
                 model=loaded,
                 cache={},               # cache dựng lại ở lần train đầu tiên
+                next_week=next_week,
                 source="disk",
                 version=self._version,
-                stats=loaded.summary(),
+                stats=stats,
             )
-            logger.info("Nạp model từ đĩa: %s", loaded.summary())
+            logger.info("Nạp model từ đĩa: %s", stats)
             return
 
         logger.info("Chưa có model. Phục vụ rỗng cho tới lần train nền đầu tiên.")
@@ -191,6 +208,18 @@ class CFModelService:
                 # File hỏng (tiến trình chết giữa lúc ghi) không được chặn khởi động.
                 logger.warning("Không đọc được model %s (%s), thử nguồn khác.", path, exc)
         return None
+
+    @staticmethod
+    def _load_next_week_from_disk() -> NextWeekPredictor | None:
+        if not NEXT_WEEK_ENABLED or not NEXT_WEEK_MODEL_PATH.exists():
+            return None
+        try:
+            nw = NextWeekPredictor.load(NEXT_WEEK_MODEL_PATH)
+            nw.model_type = NEXT_WEEK_MODEL_TYPE
+            return nw
+        except Exception as exc:                      # noqa: BLE001
+            logger.warning("Không đọc được next_week model %s (%s).", NEXT_WEEK_MODEL_PATH, exc)
+            return None
 
     # ── Vòng train nền ───────────────────────────────────────────────────
 
@@ -244,13 +273,26 @@ class CFModelService:
             logger.exception("Chu kỳ train thất bại, giữ nguyên model đang chạy.")
 
     def _saved_at(self, tz) -> datetime | None:
-        """Thời điểm model đang phục vụ được ghi ra đĩa; None nếu chưa có model."""
+        """Thời điểm model đang phục vụ được ghi ra đĩa; None nếu chưa có model hoặc thiếu model con."""
         if self._bundle is None:
             return None
+        mtimes: list[float] = []
+        rec_mtime = None
         for path in (HYBRID_MODEL_PATH, MODEL_PATH):
             if path.exists():
-                return datetime.fromtimestamp(path.stat().st_mtime, tz)
-        return None
+                rec_mtime = path.stat().st_mtime
+                break
+        if rec_mtime is None:
+            return None
+        mtimes.append(rec_mtime)
+
+        if NEXT_WEEK_ENABLED:
+            if not NEXT_WEEK_MODEL_PATH.exists():
+                return None
+            mtimes.append(NEXT_WEEK_MODEL_PATH.stat().st_mtime)
+
+        # Lấy mtime nhỏ nhất: nếu một trong hai model chưa train hoặc cũ hơn mốc, coi như cần train bù
+        return datetime.fromtimestamp(min(mtimes), tz)
 
     async def train_once(self) -> ModelBundle | None:
         """Một chu kỳ: lấy dữ liệu -> train -> tính sẵn -> đổi bản."""
@@ -279,26 +321,32 @@ class CFModelService:
         cf.fit(df, behavior=behavior, behavior_cfg=behavior_cfg)
 
         features, signals = self._load_content(errors)
-        events = self._load_purchase_events(errors)
+        events = self._load_purchase_events(errors, fallback_df=df)
         model = build_recommender(
             cf, features, signals, current_params(),
             onboarding_pseudo_count=CB_ONBOARDING_PSEUDO_COUNT,
             purchase_events=events,
             category_half_life=self._get_category_half_life(),
         )
+        next_week = self._fit_next_week(events, features, errors)
 
         cache = (
             _precompute(model, PRECOMPUTE_TOP_K, PRECOMPUTE_BUDGET_SECONDS)
             if PRECOMPUTE_ENABLED else {}
         )
 
+        stats = dict(model.summary())
+        if next_week is not None:
+            stats.update(next_week.summary())
+
         self._version += 1
         new_bundle = ModelBundle(
             model=model,
             cache=cache,
+            next_week=next_week,
             source=source,
             version=self._version,
-            stats=model.summary(),
+            stats=stats,
         )
 
         # ── ĐỔI BẢN ──────────────────────────────────────────────────────
@@ -323,6 +371,8 @@ class CFModelService:
         del previous
 
         self._persist(model)
+        if next_week is not None:
+            self._persist_next_week(next_week)
 
         logger.info(
             "Bản train #%d sẵn sàng sau %.1fs — %d khách, %d sản phẩm CF, %d tương tác, "
@@ -387,21 +437,75 @@ class CFModelService:
         """Lấy category half-life từ config. None nếu không config (dùng chung)."""
         return CATEGORY_HALF_LIFE_DAYS
 
-    def _load_purchase_events(self, errors: list[str]) -> pd.DataFrame | None:
-        """Lịch sử mua theo đơn cho kênh mua lại. Lỗi thì rơi về kênh cũ.
+    def _load_purchase_events(
+        self, errors: list[str], fallback_df: pd.DataFrame | None = None
+    ) -> pd.DataFrame | None:
+        """Lịch sử mua theo đơn cho kênh mua lại và dự đoán tuần tới. Lỗi thì rơi về dữ liệu fallback."""
+        if (REPEAT_SCORE != "order_freq" and not NEXT_WEEK_ENABLED):
+            return None
+        if clickhouse.is_configured():
+            try:
+                return clickhouse.fetch_purchase_events()
+            except clickhouse.ClickHouseUnavailable as exc:
+                errors.append(f"Không lấy được lịch sử mua theo đơn từ ClickHouse: {exc}")
+                logger.warning("%s", errors[-1])
 
-        Rơi về chứ không dừng train: kênh cũ (trọng số ma trận CF) vẫn gợi ý
-        mua lại được, chỉ kém hơn. Nhưng phải hiện ở /health — đang chạy khác
-        cấu hình đã chọn trên validation là điều bên vận hành cần biết.
-        """
-        if REPEAT_SCORE != "order_freq" or not clickhouse.is_configured():
+        # Fallback từ dataframe train nếu có đủ cột
+        if fallback_df is not None and not fallback_df.empty:
+            cols = set(fallback_df.columns)
+            if {"CustomerID", "ProductID"}.issubset(cols):
+                events = fallback_df.copy()
+                if "DaysSince" not in events.columns and "InvoiceDate" in events.columns:
+                    try:
+                        dates = pd.to_datetime(events["InvoiceDate"], errors="coerce")
+                        now = pd.Timestamp.now(tz=dates.dt.tz) if dates.dt.tz is not None else pd.Timestamp.now()
+                        events["DaysSince"] = (now - dates).dt.days.fillna(0).clip(lower=0).astype(int)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Không tính được DaysSince từ InvoiceDate: %s", exc)
+                if "DaysSince" in events.columns:
+                    req = ["CustomerID", "ProductID", "DaysSince"]
+                    if "ParentCategory" in events.columns:
+                        req.append("ParentCategory")
+                    elif "Category" in events.columns:
+                        events["ParentCategory"] = events["Category"]
+                        req.append("ParentCategory")
+                    return events[req].dropna(subset=["CustomerID", "ProductID", "DaysSince"])
+
+        return None
+
+    @staticmethod
+    def _fit_next_week(
+        events: pd.DataFrame | None,
+        features: pd.DataFrame | None,
+        errors: list[str],
+    ) -> NextWeekPredictor | None:
+        if not NEXT_WEEK_ENABLED or events is None or events.empty:
             return None
         try:
-            return clickhouse.fetch_purchase_events()
-        except clickhouse.ClickHouseUnavailable as exc:
-            errors.append(f"Không lấy được lịch sử mua theo đơn, kênh mua lại dùng cách cũ: {exc}")
+            prod_cats = None
+            if features is not None and not features.empty and "ParentCategory" in features.columns:
+                prod_cats = dict(
+                    zip(features["ProductID"].astype(str), features["ParentCategory"].fillna("").astype(str))
+                )
+            elif "ParentCategory" in events.columns:
+                prod_cats = dict(
+                    zip(events["ProductID"].astype(str), events["ParentCategory"].fillna("").astype(str))
+                )
+            return NextWeekPredictor(
+                model_type=NEXT_WEEK_MODEL_TYPE,
+                reference_mode=NEXT_WEEK_REFERENCE_MODE,
+            ).fit(events, product_categories=prod_cats)
+        except Exception as exc:                      # noqa: BLE001
+            errors.append(f"Lỗi train mô hình dự đoán 7 ngày tới: {exc}")
             logger.warning("%s", errors[-1])
             return None
+
+    def _persist_next_week(self, predictor: NextWeekPredictor) -> None:
+        try:
+            predictor.save(NEXT_WEEK_MODEL_PATH)
+            logger.info("Đã lưu next_week predictor model ra %s", NEXT_WEEK_MODEL_PATH)
+        except Exception as exc:                      # noqa: BLE001
+            logger.warning("Không lưu được next_week model ra đĩa: %s", exc)
 
     def _persist(self, model: HybridRecommender) -> None:
         """Ghi model ra đĩa để lần khởi động sau phục vụ được ngay.
@@ -413,6 +517,7 @@ class CFModelService:
         """
         try:
             model.save(HYBRID_MODEL_PATH)
+            logger.info("Đã lưu hybrid recommender model ra %s", HYBRID_MODEL_PATH)
         except Exception as exc:                      # noqa: BLE001
             # Không ghi được đĩa thì bản trong bộ nhớ vẫn dùng tốt.
             logger.warning("Không lưu được model ra đĩa: %s", exc)
@@ -431,21 +536,24 @@ class CFModelService:
                 customers=0, products=0, interactions=0, version=API_VERSION,
                 last_error=self._last_error,
             )
+        model_loaded = (bundle.model is not None or bundle.next_week is not None)
         return HealthResponse(
-            status="ok", model_name=MODEL_NAME, model_loaded=True,
-            customers=bundle.stats.get("customers", 0),
-            products=bundle.stats.get("products", 0),
-            interactions=bundle.stats.get("interactions", 0),
+            status="ok", model_name=MODEL_NAME, model_loaded=model_loaded,
+            customers=int(bundle.stats.get("customers", bundle.stats.get("next_week_customers", 0))),
+            products=int(bundle.stats.get("products", 0)),
+            interactions=int(bundle.stats.get("interactions", bundle.stats.get("next_week_pairs", 0))),
             version=API_VERSION,
             model_version=bundle.version,
             trained_at=bundle.trained_at.isoformat(),
             data_source=bundle.source,
             cached_customers=len(bundle.cache),
-            candidates=bundle.stats.get("candidates", 0),
-            onboarded_customers=bundle.stats.get("onboarded_customers", 0),
+            candidates=int(bundle.stats.get("candidates", 0)),
+            onboarded_customers=int(bundle.stats.get("onboarded_customers", 0)),
             content_based=bool(bundle.stats.get("content_based", 0)),
             repeat_model=bool(bundle.stats.get("repeat_model", 0)),
             behavior=bool(bundle.stats.get("behavior", 0)),
+            next_week_model=bundle.next_week is not None,
+            next_week_model_type=(bundle.next_week.model_type if bundle.next_week is not None else None),
             last_error=self._last_error,
         )
 
@@ -455,6 +563,8 @@ class CFModelService:
         cached = bundle.cache.get(cid)
         if cached is not None and len(cached) >= top_k:
             return cached[:top_k]
+        if bundle.model is None:
+            return []
         # Không có trong cache (khách mới mua lần đầu, hoặc xin nhiều hơn
         # số đã tính sẵn) thì tính tại chỗ từ CHÍNH bản model này.
         return [(pid, reason) for pid, _, reason in bundle.model.recommend(cid, top_k=top_k)]
@@ -473,7 +583,7 @@ class CFModelService:
         # request có thể rơi vào hai bản khác nhau nếu vòng train đổi bản ở
         # giữa — lúc đó cache của bản này ghép với model của bản kia.
         bundle = self._bundle
-        if bundle is None:
+        if bundle is None or bundle.model is None:
             return CustomerRecommendationResponse(customer_id=customer_id, recommendations=[])
 
         cid = str(customer_id)
@@ -494,7 +604,7 @@ class CFModelService:
         mới thì tính tại chỗ: cache được tính từ hồ sơ CŨ, trả nó là trả gợi ý sai.
         """
         bundle = self._bundle                         # chụp MỘT lần, như GET
-        if bundle is None:
+        if bundle is None or bundle.model is None:
             return CustomerRecommendationResponse(customer_id=customer_id, recommendations=[])
 
         cid = str(customer_id)
@@ -525,7 +635,7 @@ class CFModelService:
         với trọng số tương ứng nhưng KHÔNG bị đánh dấu đã mua (vẫn được gợi ý lại).
         """
         bundle = self._bundle
-        if bundle is None:
+        if bundle is None or bundle.model is None:
             return CustomerRecommendationResponse(customer_id=customer_id, recommendations=[])
 
         cid = str(customer_id)
@@ -541,3 +651,67 @@ class CFModelService:
             " (dùng đường GET)" if live.empty else "",
         )
         return self._response(cid, items)
+
+    @staticmethod
+    def _next_week_response(
+        cid: str,
+        horizon_days: int,
+        model_type: str | None,
+        items: list[dict],
+    ) -> NextWeekPredictionResponse:
+        return NextWeekPredictionResponse(
+            customer_id=cid,
+            horizon_days=int(horizon_days),
+            model_type=model_type,
+            predictions=[NextWeekPredictionItem(**row) for row in items],
+        )
+
+    def predict_next_week(
+        self,
+        customer_id: str,
+        top_k: int = 10,
+        horizon_days: int = 7,
+        min_prob: float = 0.05,
+        model_type: str | None = None,
+    ) -> NextWeekPredictionResponse:
+        """Dự đoán các sản phẩm khách có xác suất mua lại cao nhất trong W ngày tới."""
+        bundle = self._bundle
+        cid = str(customer_id)
+        if bundle is None or bundle.next_week is None:
+            return self._next_week_response(cid, horizon_days, model_type or NEXT_WEEK_MODEL_TYPE, [])
+
+        chosen = model_type or bundle.next_week.model_type
+        items = bundle.next_week.predict(
+            customer_id=cid,
+            top_k=top_k,
+            horizon_days=horizon_days,
+            min_prob=min_prob,
+            model_type=chosen,
+        )
+        return self._next_week_response(cid, horizon_days, chosen, items)
+
+    def predict_next_week_realtime(
+        self,
+        customer_id: str,
+        purchased_product_ids: list[str],
+        top_k: int = 10,
+        horizon_days: int = 7,
+        min_prob: float = 0.05,
+        model_type: str | None = None,
+    ) -> NextWeekPredictionResponse:
+        """Dự đoán W ngày tới có gộp đơn mua trong ngày (DaysSince = 0)."""
+        bundle = self._bundle
+        cid = str(customer_id)
+        if bundle is None or bundle.next_week is None:
+            return self._next_week_response(cid, horizon_days, model_type or NEXT_WEEK_MODEL_TYPE, [])
+
+        chosen = model_type or bundle.next_week.model_type
+        items = bundle.next_week.predict_realtime(
+            customer_id=cid,
+            purchased_product_ids=purchased_product_ids,
+            top_k=top_k,
+            horizon_days=horizon_days,
+            min_prob=min_prob,
+            model_type=chosen,
+        )
+        return self._next_week_response(cid, horizon_days, chosen, items)
